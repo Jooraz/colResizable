@@ -159,7 +159,7 @@
 		}else{							//in serialization mode (after resizing a column)
 			S[t.id] ="";				//clean up previous data
 			for(;i < t.c.length; i++){	//iterate through columns
-				w = t.c[i].width();		//width is obtained
+				w = t.c[i].innerWidth();//width is obtained, used innerWidth instead of width since width might provide wrong results
 				S[t.id] += w+";";		//width is appended to the sessionStorage object using ID as key
 				m+=w;					//carriage is updated to obtain the full size used by columns
 			}
@@ -412,4 +412,3 @@
         }
     });
 })(jQuery);
-
