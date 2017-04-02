@@ -14,6 +14,7 @@
 
 (function ($) {
 
+    var version = '1.7.0';
     var d = $(document); 		//window object
     var h = $("head");			//head object
     var drag = null;			//reference to the current grip that is being dragged
@@ -30,16 +31,16 @@
     var I = parseInt;
     var M = Math;
     var ie = navigator.userAgent.indexOf('Trident/4.0') > 0;
-    var SessionStorage;
-    var pad = ""
+    var Storage;
+    var pad = "";
     try {
-        SessionStorage = sessionStorage;
+        Storage = sessionStorage;
     } catch (e) {
     }	//Firefox crashes when executed as local file system
 
 
     //append required CSS rules
-    h.append("<style type='text/css'>  .JColResizer{table-layout:fixed;} .JColResizer > tbody > tr > td, .JColResizer > tbody > tr > th{overflow:hidden}  .JPadding > tbody > tr > td, .JPadding > tbody > tr > th{padding-left:0!important; padding-right:0!important;} .JCLRgrips{ height:0px; position:relative;} .JCLRgrip{margin-left:-5px; position:absolute; z-index:5; } .JCLRgrip .JColResizer{position:absolute;background-color:red;filter:alpha(opacity=1);opacity:0;width:10px;height:100%;cursor: col-resize;top:0px} .JCLRLastGrip{position:absolute; width:1px; } .JCLRgripDrag{ border-left:1px dotted black;	} .JCLRFlex{width:auto!important;} .JCLRgrip.JCLRdisabledGrip .JColResizer{cursor:default; display:none;}</style>");
+    h.append("<style type='text/css'>.JColResizer{table-layout:fixed}.JColResizer>tbody>tr>td{width:0}.JColResizer>tbody>tr>td,.JColResizer>tbody>tr>th{overflow:hidden;word-break:break-word;overflow-wrap: break-word; word-wrap: break-word; -webkit-hyphens: auto; -ms-hyphens: auto; -moz-hyphens: auto; hyphens: auto;}.JPadding>tbody>tr>td,.JPadding>tbody>tr>th{padding-left:0!important;padding-right:0!important}.JCLRgrips{height:0;position:relative}.JCLRgrip{margin-left:-6px;position:absolute;z-index:5}.JCLRgrip .JColResizer{position:absolute;background-color:red;filter:alpha(opacity=1);opacity:0;width:10px;height:100%;cursor:col-resize;top:0}.JCLRLastGrip{margin-left:-10px;position:absolute;width:1px}.JCLRgripDrag .JColResizer{width:0;margin-left:0}.JCLRgripDrag{margin-left:-1px;border-left:1px dotted #000}.JCLRFlex{width:auto!important}.JCLRgrip.JCLRdisabledGrip .JColResizer{cursor:default;display:none}</style>");
 
 
     /**
@@ -70,49 +71,130 @@
         t.b = I(ie ? tb.border || tb.currentStyle.borderLeftWidth : t.css('border-left-width')) || 1;	//outer border width (again cross-browser issues)
         // if(!(tb.style.width || tb.width)) t.width(t.width()); //I am not an IE fan at all, but it is a pity that only IE has the currentStyle attribute working as expected. For this reason I can not check easily if the table has an explicit width or if it is rendered as "auto"
         tables[id] = t; 	//the table object is stored using its id as key
+
+        if(t.opt.useLocalStorage){
+            Storage = localStorage;
+        }
+
         createGrips(t);		//grips are created
+        if (t.p && Storage) {
+            memento(t); //save settings
+        }
     };
+
+    /**
+     * Uses canvas.measureText to compute and return the width of the given text of given font in pixels.
+     *
+     * @param {String} text The text to be rendered.
+     * @param {String} font The css font descriptor that text is to be rendered with (e.g. "bold 14px verdana").
+     *
+     * @see http://stackoverflow.com/questions/118241/calculate-text-width-with-javascript/21015393#21015393
+     */
+    function getTextWidth(text, font) {
+        // re-use canvas object for better performance
+        var canvas = getTextWidth.canvas || (getTextWidth.canvas = document.createElement("canvas"));
+        var context = canvas.getContext("2d");
+        context.font = font;
+        var metrics = context.measureText(text);
+        return metrics.width;
+    }
 
     /**
      * Function to fit content of header in selected amount of lines
      * @param {jQuery ref} t - table object
-     * @param {bool} force - if true, ignores SessionStorage value
+     * @param {bool} force - if true, ignores Storage value
      * @param {number} maxLines - maximum amount of lines allowed to display
      */
-    var autoFitWithTextInHeaders = function (t, force, maxLines) {
-        if (force || (SessionStorage && !SessionStorage[t.id])) {
-            maxLines = maxLines || 1;
+    var autoFitWithTextInHeaders = function (t) {
+        if (t.opt.autoFitForce || Storage) {
             var elements = obtainTableHeaders(t);
 
-            var increment = 2; // n/2 still O(n) but let's be reasonable and not pixel perfect
-            var measuredDiv = t[0];
-            for (var i = 0; i < elements.length; i++) {
-                var $th = $(elements[i]);
-                var th = $th[0];
-                var el = $th.find('div:first-child');
-                if (el && el.length > 0 && el.text().trim().length > 0) { //paranoid parrot check
-                    var stop = 0;
-                    var maxHeight = maxLines * parseFloat(el.css('line-height'));
-                    while (el.height() > maxHeight) {
-                        var n = parseInt(th.clientWidth) + increment + "px";
+            var maxLines = t.opt.autoFitMaxLines || 1;
+
+            //2 elems with additional information of table
+            if (t.opt.autoFitForce || (!Storage[getNameForCurrentVersion(t.id)] ||
+                Storage[getNameForCurrentVersion(t.id)].split(";").length - 2 !== elements.length)) {
+
+                var increment = 2; // n/2 still O(n) but let's be reasonable and not pixel perfect
+                var measuredDiv = t[0];
+                measuredDiv.style['min-width'] = "0px";
+                measuredDiv.style['width'] = "0px";
+
+                _.each(elements, function (th) {
+                    var $th = $(th);
+                    var el = $($th.find('div:first-child')[0]);
+                    if (el && el.length > 0 && el.text().trim().length > 0) { //paranoid parrot check
+                        th.style['width'] = "0px";
+                    }
+                });
+
+                var last = null;
+                var loops = 0;
+                for (var i = 0; i < elements.length; i++) {
+                    var $th = $(elements[i]);
+                    var th = $th[0];
+                    var el = $($th.find('div:first-child')[0]);
+                    var text = el.text().trim();
+                    if (el && el.length > 0 && text.length > 0) { //paranoid parrot check
+                        var div = $('<div>').attr('style', 'position:absolute;left:0');
+                        var div2 = $('<div>').attr('style', "width:0px; overflow: hidden;display:inline");
+                        div.append(div2);
+                        div.appendTo(el.parent());
+                        div2.append(el);
+                        var elWidth = el.width();
+                        $th.prepend(el);
+                        div.remove();
+                        div2.remove();
+                        el.css('width', elWidth + "px");
+
+                        elWidth += parseInt($th.css('padding-left')) + parseInt($th.css('padding-right'));
+                        el.css('width', '');
+                        var widthToAdd = elWidth;
+
+                        var n = widthToAdd + t.opt.marginLeft + increment + "px";
                         th.style['width'] = n;
 
-                        measuredDiv.style['min-width'] = measuredDiv.clientWidth + increment + "px";
-                        if (stop++ > 1000) { //just in case
-                            break;
+                        var stop = 0;
+                        var maxHeight = maxLines * Math.ceil(parseFloat(el.css('line-height'))) + 1;
+                        //paranoid parrot check
+                        //if still doesn't fit
+                        while (el.height() > maxHeight) {
+                            var n = th.clientWidth + increment + "px";
+                            th.style['width'] = n;
+                            if (stop++ > 1000) { //just in case
+                                break;
+                            }
+                            loops++;
                         }
+                        widthToAdd = parseInt(th.clientWidth);
+
+                        last = th;
+                        n = widthToAdd + t.opt.marginLeft + increment + "px";
+                        th.style['width'] = n;
                     }
                 }
-            }
+                if (t.opt.autoFitLastElement && last) {
+                    var widthTarget = t.parents('[width-target]:first').width();
+                    var additionalSize = widthTarget - $(measuredDiv).innerWidth();
+                    if (additionalSize > 0) {
+                        n = last.clientWidth + (additionalSize) + "px";
+                        last.style['width'] = n;
+                    }
+                }
 
-            //recalculate settings
-            if (!t.f) {
-                applyBounds(t);	//if not fixed mode, then apply bounds to obtain real width values
-            }
-            // syncGrips(t);
+                var realWidth = _.reduce(_.map(obtainTableHeaders(t, true), function (el) {
+                    return $(el).innerWidth()
+                }), function (x, y) {
+                    return x + y;
+                });
 
-            if (t.p && SessionStorage) {
-                memento(t); //save settings
+                measuredDiv.style['min-width'] = realWidth + "px";
+                measuredDiv.style['width'] = realWidth + "px";
+
+                //recalculate settings
+                if (!t.f) {
+                    applyBounds(t);	//if not fixed mode, then apply bounds to obtain real width values
+                }
             }
         }
     };
@@ -129,16 +211,20 @@
         delete tables[id];						//clean up data
     };
 
-    var obtainTableHeaders = function (t) {
+    var obtainTableHeaders = function (t, nofilter) {
         var th = t.find(">thead>tr:first>th,>thead>tr:first>td"); //table headers are obtained
         if (!th.length) {
             th = t.find(">tbody>tr:first>th,>tr:first>th,>tbody>tr:first>td, >tr:first>td");	 //but headers can also be included in different ways
         }
-        th = th.filter(":visible");					//filter invisible columns
-
+        if (!nofilter) {
+            th = th.filter(":visible");					//filter invisible columns
+        }
         return th;
     }
 
+    var getNameForCurrentVersion = function (name) {
+        return name + '_' + version;
+    };
     /**
      * Function to create all the grips associated with the table given by parameters
      * @param {jQuery ref} t - table object
@@ -149,7 +235,13 @@
 
         t.cg = t.find("col"); 						//a table can also contain a colgroup with col elements
         t.ln = th.length;							//table length is stored
-        if (t.p && SessionStorage && SessionStorage[t.id]) memento(t, th);		//if 'postbackSafe' is enabled and there is data for the current table, its coloumn layout is restored
+
+        if (t.p && Storage && Storage[getNameForCurrentVersion(t.id)]) {
+            if (Storage[getNameForCurrentVersion(t.id)].split(';').length - 2 === t.ln) {
+                memento(t, th);		//if 'postbackSafe' is enabled and there is data for the current table, its coloumn layout is restored
+            }
+        }
+
         th.each(function (i) {						//iterate through the table column headers
             var c = $(this); 						//jquery wrap for the current column
             var dc = t.dc.indexOf(i) != -1;           //is this a disabled column?
@@ -179,7 +271,7 @@
         });
 
         if (t.opt.autoFit) {
-            autoFitWithTextInHeaders(t, t.opt.autoFitForce, t.opt.autoFitMaxLines);
+            autoFitWithTextInHeaders(t);
         }
 
         t.cg.removeAttr("width");	//remove the width attribute from elements in the colgroup
@@ -208,10 +300,10 @@
         if (th) {										//in deserialization mode (after a postback)
             t.cg.removeAttr("width");
             if (t.opt.flush) {
-                SessionStorage[t.id] = "";
+                Storage[getNameForCurrentVersion(t.id)] = "";
                 return;
             } 	//if flush is activated, stored data is removed
-            w = SessionStorage[t.id].split(";");					//column widths is obtained
+            w = Storage[getNameForCurrentVersion(t.id)].split(";");					//column widths is obtained
             tw = w[t.ln + 1];
             if (!t.f && tw) {							//if not fixed and table width data available its size is restored
                 t.width(tw *= 1);
@@ -221,21 +313,23 @@
                 }
             }
             for (; i < t.ln; i++) {						//for each column
-                aux.push(100 * w[i] / w[t.ln] + "%"); 	//width is stored in an array since it will be required again a couple of lines ahead
+                //aux.push(100 * w[i] / w[t.ln + 1] + "%"); 	//width is stored in an array since it will be required again a couple of lines ahead
+                aux.push(w[i] + "px");
                 th.eq(i).css("width", aux[i]); 	//each column width in % is restored
+                th.eq(i).innerWidth(w[i]);
             }
             for (i = 0; i < t.ln; i++)
                 t.cg.eq(i).css("width", aux[i]);	//this code is required in order to create an inline CSS rule with higher precedence than an existing CSS class in the "col" elements
         } else {							//in serialization mode (after resizing a column)
-            SessionStorage[t.id] = "";				//clean up previous data
+            Storage[getNameForCurrentVersion(t.id)] = "";				//clean up previous data
             for (; i < t.c.length; i++) {	//iterate through columns
                 w = t.c[i].innerWidth();//width is obtained, used innerWidth instead of width since width might provide wrong results
-                SessionStorage[t.id] += w + ";";		//width is appended to the sessionStorage object using ID as key
+                Storage[getNameForCurrentVersion(t.id)] += w + ";";		//width is appended to the sessionStorage object using ID as key
                 m += w;					//carriage is updated to obtain the full size used by columns
             }
-            SessionStorage[t.id] += m;							//the last item of the serialized string is the table's active area (width),
+            Storage[getNameForCurrentVersion(t.id)] += m;							//the last item of the serialized string is the table's active area (width),
             //to be able to obtain % width value of each columns while deserializing
-            if (!t.f) SessionStorage[t.id] += ";" + t.width(); 	//if not fixed, table width is stored
+            if (!t.f) Storage[getNameForCurrentVersion(t.id)] += ";" + t.width(); 	//if not fixed, table width is stored
         }
     };
 
@@ -244,7 +338,10 @@
      * Function that places each grip in the correct position according to the current table layout
      * @param {jQuery ref} t - table object
      */
-    var syncGrips = function (t) {
+    var syncGrips = function (t, dragging) {
+        if(dragging && t.w === t.gc.width()){
+            return;
+        }
         t.gc.width(t.w);			//the grip's container width is updated
         for (var i = 0; i < t.ln; i++) {	//for each column
             var c = t.c[i];
@@ -338,7 +435,7 @@
             } else {
                 syncCols(t, i); 			//columns are synchronized
             }
-            syncGrips(t);
+            syncGrips(t, true);
             var cb = t.opt.onDrag;							//check if there is an onDrag callback
             if (cb) {
                 e.currentTarget = t[0];
@@ -348,6 +445,42 @@
         return false; 	//prevent text selection while dragging
     };
 
+    // Returns a function, that, when invoked, will only be triggered at most once
+    // during a given window of time. Normally, the throttled function will run
+    // as much as it can, without ever going more than once per `wait` duration;
+    // but if you'd like to disable the execution on the leading edge, pass
+    // `{leading: false}`. To disable execution on the trailing edge, ditto.
+    var throttle = function (func, wait, options) {
+        var context, args, result;
+        var timeout = null;
+        var previous = 0;
+        if (!options) options = {};
+        var later = function () {
+            previous = options.leading === false ? 0 : Date.now();
+            timeout = null;
+            result = func.apply(context, args);
+            if (!timeout) context = args = null;
+        };
+        return function () {
+            var now = Date.now();
+            if (!previous && options.leading === false) previous = now;
+            var remaining = wait - (now - previous);
+            context = this;
+            args = arguments;
+            if (remaining <= 0 || remaining > wait) {
+                if (timeout) {
+                    clearTimeout(timeout);
+                    timeout = null;
+                }
+                previous = now;
+                result = func.apply(context, args);
+                if (!timeout) context = args = null;
+            } else if (!timeout && options.trailing !== false) {
+                timeout = setTimeout(later, remaining);
+            }
+            return result;
+        };
+    };
 
     /**
      * Event handler fired when the dragging is over, updating table layout
@@ -377,7 +510,7 @@
                 e.currentTarget = t[0];
                 cb(e);
             }	//if there is a callback function, it is fired
-            if (t.p && SessionStorage) memento(t); 	//if postbackSafe is enabled and there is sessionStorage support, the new layout is serialized and stored
+            if (t.p && Storage) memento(t); 	//if postbackSafe is enabled and there is sessionStorage support, the new layout is serialized and stored
         }
         drag = null;   //since the grip's dragging is over
     };
@@ -396,7 +529,7 @@
         g.l = g.position().left;
         g.x = g.l;
 
-        d.bind('touchmove.' + SIGNATURE + ' mousemove.' + SIGNATURE, onGripDrag).bind('touchend.' + SIGNATURE + ' mouseup.' + SIGNATURE, onGripDragOver);	//mousemove and mouseup events are bound
+        d.bind('touchmove.' + SIGNATURE + ' mousemove.' + SIGNATURE, throttle(onGripDrag, 10)).bind('touchend.' + SIGNATURE + ' mouseup.' + SIGNATURE, onGripDragOver);	//mousemove and mouseup events are bound
         h.append("<style type='text/css'>*{cursor:" + t.opt.dragCursor + "!important}</style>"); 	//change the mouse cursor
         g.addClass(t.opt.draggingClass); 	//add the dragging class (to allow some visual feedback)
         drag = g;							//the current grip is stored as the current dragging object
@@ -430,7 +563,7 @@
                     //c.l locks the column, telling us that its c.w is outdated
                 } else {     //in non fixed-sized tables
                     applyBounds(t);         //apply the new bounds
-                    if (t.mode == 'flex' && t.p && SessionStorage) {   //if postbackSafe is enabled and there is sessionStorage support,
+                    if (t.mode == 'flex' && t.p && Storage) {   //if postbackSafe is enabled and there is sessionStorage support,
                         memento(t);                     //the new layout is serialized and stored for 'flex' tables
                     }
                 }
@@ -471,6 +604,7 @@
                 partialRefresh: false,			//can be used in combination with postbackSafe when the table is inside of an updatePanel,
                 disabledColumns: [],            //column indexes to be excluded
                 removePadding: true,           //for some uses (such as multiple range slider), it is advised to set this modifier to true, it will remove padding from the header cells.
+                useLocalStorage: true,
 
                 //events:
                 onDrag: null, 					//callback function to be fired during the column resizing process if liveDrag is enabled
